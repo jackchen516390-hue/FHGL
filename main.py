@@ -1,56 +1,84 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
-from config import BOT_TOKEN
-from datetime import datetime
 
-ADMINS=[8222147822]
-pending={}
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+from config import BOT_TOKEN, ADMINS
 
-def is_admin(uid): return uid in ADMINS
 
-async def panel(update, context):
-    if not is_admin(update.effective_user.id): return
-    kb=[[InlineKeyboardButton("🟢 上课",callback_data="on"),InlineKeyboardButton("🔴 下课",callback_data="off")],
-        [InlineKeyboardButton("🚫 封禁用户",callback_data="ban"),InlineKeyboardButton("🔓 解封用户",callback_data="unban")],
-        [InlineKeyboardButton("📋 操作日志",callback_data="log")]]
-    await update.message.reply_text("👮 FHGL 管理员面板",reply_markup=InlineKeyboardMarkup(kb))
+def is_admin(uid):
+    return uid in ADMINS
 
-async def button(update, context):
-    q=update.callback_query
-    if not is_admin(q.from_user.id): return
-    await q.answer()
-    if q.data=="ban":
-        pending[q.from_user.id]="ban"
-        await q.edit_message_text("🚫 请回复需要封禁成员的一条消息")
-    elif q.data=="unban":
-        pending[q.from_user.id]="unban"
-        await q.edit_message_text("🔓 请发送需要解封的用户ID")
-    elif q.data=="log":
-        await q.edit_message_text("📋 操作日志功能已开启")
-    else:
-        await q.edit_message_text("操作完成")
 
-async def msg(update, context):
-    if not update.message or not is_admin(update.effective_user.id): return
-    act=pending.get(update.effective_user.id)
-    if act=="ban" and update.message.reply_to_message:
-        uid=update.message.reply_to_message.from_user.id
-        await update.effective_chat.ban_member(uid)
-        await update.message.reply_text(f"🚫 已封禁用户 {uid}\n{datetime.now()}")
-        pending.pop(update.effective_user.id,None)
-    elif act=="unban":
-        try:
-            uid=int(update.message.text)
-            await update.effective_chat.unban_member(uid)
-            await update.message.reply_text(f"🔓 已解除封禁 {uid}")
-        except: await update.message.reply_text("请输入正确ID")
-        pending.pop(update.effective_user.id,None)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 FHGL群管机器人\n"
+        "管理员群内回复消息使用 /ban"
+    )
+
+
+async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ 无权限")
+        return
+
+    if not update.message.reply_to_message:
+        await update.message.reply_text("请回复需要封禁成员的消息后发送 /ban")
+        return
+
+    target = update.message.reply_to_message.from_user
+
+    try:
+        await update.effective_chat.ban_member(target.id)
+        await update.message.reply_text(
+            f"🚫 已封禁用户\n\n"
+            f"用户：{target.first_name}\n"
+            f"ID：{target.id}\n"
+            f"操作人：{update.effective_user.id}"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"执行失败：{e}")
+
+
+async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ 无权限")
+        return
+
+    if not context.args:
+        await update.message.reply_text("用法：/unban 用户ID")
+        return
+
+    try:
+        uid = int(context.args[0])
+        await update.effective_chat.unban_member(uid)
+        await update.message.reply_text(
+            f"🔓 已解除封禁\n用户ID：{uid}"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"执行失败：{e}")
+
+
+async def user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.reply_to_message:
+        u = update.message.reply_to_message.from_user
+        await update.message.reply_text(
+            f"👤 用户信息\n\n"
+            f"用户名：{u.username}\n"
+            f"ID：{u.id}"
+        )
+
 
 def main():
-    app=Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("panel",panel))
-    app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,msg))
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("ban", ban))
+    app.add_handler(CommandHandler("unban", unban))
+    app.add_handler(CommandHandler("user", user_info))
+
+    print("FHGL V2.4 群内管理版启动")
+
     app.run_polling()
 
-if __name__=="__main__": main()
+
+if __name__ == "__main__":
+    main()
