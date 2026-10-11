@@ -13,7 +13,7 @@ def is_admin(uid):
     return uid in ADMINS
 
 
-def load_json(path):
+def load_file(path):
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -21,107 +21,160 @@ def load_json(path):
         return []
 
 
-def save_json(path, data):
+def save_file(path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def add_log(action, admin, target=""):
-    logs = load_json(LOG_FILE)
+def log(action, admin, target=""):
+    logs = load_file(LOG_FILE)
     logs.append({
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "action": action,
         "admin": admin,
         "target": target
     })
-    save_json(LOG_FILE, logs[-200:])
+    save_file(LOG_FILE, logs[-200:])
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("FHGL完整群管机器人运行中")
+    await update.message.reply_text("FHGL群管机器人运行中")
 
 
-async def text_manage(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not is_admin(update.effective_user.id):
+# 上课：解除全群禁言并提示
+async def class_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
         return
 
-    if update.message.text == "下课":
-        await update.effective_chat.set_permissions(
-            ChatPermissions(can_send_messages=False)
-        )
-        add_log("下课禁言", update.effective_user.id)
+    permissions = ChatPermissions(
+        can_send_messages=True,
+        can_send_audios=True,
+        can_send_documents=True,
+        can_send_photos=True,
+        can_send_videos=True,
+        can_send_video_notes=True,
+        can_send_voice_notes=True,
+        can_send_polls=True,
+        can_send_other_messages=True
+    )
 
-    elif update.message.text == "上课":
-        await update.effective_chat.set_permissions(
-            ChatPermissions(can_send_messages=True)
-        )
-        add_log("上课解禁", update.effective_user.id)
+    await update.effective_chat.set_permissions(permissions=permissions)
+    log("上课解除禁言", update.effective_user.id)
+
+    await update.message.reply_text(
+        "🟢 已上课\n\n群内恢复正常发言"
+    )
+
+
+# 下课：全群禁言并提示
+async def class_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+
+    permissions = ChatPermissions(
+        can_send_messages=False
+    )
+
+    await update.effective_chat.set_permissions(permissions=permissions)
+    log("下课开启禁言", update.effective_user.id)
+
+    await update.message.reply_text(
+        "🔴 已下课\n\n群内已开启禁言模式"
+    )
 
 
 async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
+
     if not update.message.reply_to_message:
+        await update.message.reply_text("请回复需要封禁成员的消息后发送 /ban")
         return
 
     uid = update.message.reply_to_message.from_user.id
     await update.effective_chat.ban_member(uid)
-    add_log("封禁用户", update.effective_user.id, uid)
-    await update.message.reply_text(f"🚫 已封禁\nID:{uid}")
+
+    log("封禁用户", update.effective_user.id, uid)
+
+    await update.message.reply_text(
+        f"🚫 已封禁用户\nID: {uid}"
+    )
 
 
 async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id) or not context.args:
+    if not is_admin(update.effective_user.id):
         return
+
+    if not context.args:
+        return
+
     uid = int(context.args[0])
     await update.effective_chat.unban_member(uid)
-    add_log("解封用户", update.effective_user.id, uid)
+    log("解封用户", update.effective_user.id, uid)
 
 
 async def black(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
+
     if not update.message.reply_to_message:
         return
 
-    user = update.message.reply_to_message.from_user
-    data = load_json(BLACK_FILE)
+    uid = update.message.reply_to_message.from_user.id
+    data = load_file(BLACK_FILE)
 
-    if user.id not in data:
-        data.append(user.id)
-        save_json(BLACK_FILE, data)
+    if uid not in data:
+        data.append(uid)
+        save_file(BLACK_FILE, data)
 
-    add_log("加入黑名单", update.effective_user.id, user.id)
-    await update.message.reply_text(f"🚫 黑名单加入\nID:{user.id}")
+    log("加入黑名单", update.effective_user.id, uid)
+
+    await update.message.reply_text(
+        f"🚫 已加入黑名单\nID: {uid}"
+    )
 
 
 async def unblack(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id) or not context.args:
+    if not is_admin(update.effective_user.id):
+        return
+
+    if not context.args:
         return
 
     uid = int(context.args[0])
-    data = load_json(BLACK_FILE)
+    data = load_file(BLACK_FILE)
 
     if uid in data:
         data.remove(uid)
-        save_json(BLACK_FILE, data)
+        save_file(BLACK_FILE, data)
 
-    add_log("移除黑名单", update.effective_user.id, uid)
+    log("移除黑名单", update.effective_user.id, uid)
 
 
 async def blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
 
-    data = load_json(BLACK_FILE)
-    await update.message.reply_text(f"🚫 黑名单:\n{data}")
+    await update.message.reply_text(
+        f"🚫 黑名单:\n{load_file(BLACK_FILE)}"
+    )
 
 
 async def check_black(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message:
-        data = load_json(BLACK_FILE)
-        if update.effective_user.id in data:
+    if update.effective_user and update.effective_user.id in load_file(BLACK_FILE):
+        if update.message:
             await update.message.delete()
+
+
+async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.text:
+        return
+
+    if update.message.text == "上课":
+        await class_on(update, context)
+
+    elif update.message.text == "下课":
+        await class_off(update, context)
 
 
 def main():
@@ -134,10 +187,10 @@ def main():
     app.add_handler(CommandHandler("unblack", unblack))
     app.add_handler(CommandHandler("blacklist", blacklist))
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_manage))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
     app.add_handler(MessageHandler(filters.ALL, check_black))
 
-    print("FHGL V2.6 完整群管版启动")
+    print("FHGL V2.6.1 完整群管修正版启动")
     app.run_polling()
 
 
