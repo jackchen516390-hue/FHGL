@@ -1,4 +1,4 @@
-"""FHGL V2.6.3: Chinese group commands and independent /gm_* commands."""
+"""FHGL V2.6.4: per-group bot administrators and Telegram admin delegation."""
 import logging
 import os
 import sqlite3
@@ -20,7 +20,8 @@ def connect():
     DB.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(DB), timeout=20)
     con.execute('PRAGMA busy_timeout=20000')
-    con.execute('CREATE TABLE IF NOT EXISTS admins (uid INTEGER PRIMARY KEY, added_by INTEGER, created TEXT)')
+    con.execute('CREATE TABLE IF NOT EXISTS admins (uid INTEGER PRIMARY KEY, added_by INTEGER, created TEXT)')  # legacy; retained without deletion
+    con.execute('CREATE TABLE IF NOT EXISTS group_admins (chat_id INTEGER NOT NULL, uid INTEGER NOT NULL, added_by INTEGER, created TEXT, PRIMARY KEY(chat_id, uid))')
     con.execute('CREATE TABLE IF NOT EXISTS blacklist (chat_id INTEGER, uid INTEGER, name TEXT, added_by INTEGER, created TEXT, PRIMARY KEY(chat_id, uid))')
     con.execute('CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, actor INTEGER, action TEXT, target INTEGER, created TEXT)')
     con.commit()
@@ -40,23 +41,41 @@ def is_super(uid):
     return uid in SUPER_ADMINS
 
 
-def is_admin(uid):
+def is_admin(uid, chat_id):
+    """Bot administrator authorization is limited to a specific group."""
     if is_super(uid):
         return True
     with connect() as con:
-        return con.execute('SELECT 1 FROM admins WHERE uid=?', (uid,)).fetchone() is not None
+        return con.execute('SELECT 1 FROM group_admins WHERE chat_id=? AND uid=?', (chat_id, uid)).fetchone() is not None
 
 
-async def guard(update, super_only=False):
+async def is_telegram_admin(context, chat_id, uid):
+    """Check actual Telegram group owner/admin status (not merely a bot role)."""
+    try:
+        member = await context.bot.get_chat_member(chat_id, uid)
+        return member.status in (ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR)
+    except TelegramError as exc:
+        logger.warning('Cannot check Telegram admin status: %s', exc)
+        return False
+
+
+async def guard(update, context, manage_admins=False):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if not msg or not chat or chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         if msg:
             await msg.reply_text('请在 FHGL 管理的群内使用此命令。')
         return False
-    if not user or not (is_super(user.id) if super_only else is_admin(user.id)):
-        await msg.reply_text('❌ 无权限执行此操作。')
+    if not user:
+        await msg.reply_text('❌ 无法确认操作人身份。')
         return False
-    return True
+    if is_super(user.id):
+        return True
+    tg_admin = await is_telegram_admin(context, chat.id, user.id)
+    # Only Telegram group owner/admin or bot super-admin may delegate bot admin roles.
+    allowed = tg_admin if manage_admins else (tg_admin or is_admin(user.id, chat.id))
+    if not allowed:
+        await msg.reply_text('❌ 无权限执行此操作。')
+    return allowed
 
 
 def target_from(update, context):
@@ -71,7 +90,7 @@ def target_from(update, context):
 
 
 async def protected(update, context, uid):
-    if is_admin(uid):
+    if is_admin(uid, update.effective_chat.id):
         await update.effective_message.reply_text('❌ 不能封禁或拉黑机器人管理员。')
         return True
     bot_id = context.bot.id
@@ -91,7 +110,7 @@ async def protected(update, context, uid):
 
 
 async def on(update, context):
-    if not await guard(update): return
+    if not await guard(update, context): return
     await context.bot.set_chat_permissions(update.effective_chat.id, ChatPermissions(
         can_send_messages=True, can_send_audios=True, can_send_documents=True,
         can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
@@ -102,14 +121,14 @@ async def on(update, context):
 
 
 async def off(update, context):
-    if not await guard(update): return
+    if not await guard(update, context): return
     await context.bot.set_chat_permissions(update.effective_chat.id, ChatPermissions(can_send_messages=False))
     audit(update.effective_chat.id, update.effective_user.id, '下课')
     await update.effective_message.reply_text('🔴 已下课\n群内已开启禁言，普通成员暂停发言。')
 
 
 async def ban(update, context):
-    if not await guard(update): return
+    if not await guard(update, context): return
     uid, name = target_from(update, context)
     if uid is None:
         await update.effective_message.reply_text('请回复目标成员的消息发送「封禁」，或使用 /gm_ban 用户ID。')
@@ -121,7 +140,7 @@ async def ban(update, context):
 
 
 async def unban(update, context):
-    if not await guard(update): return
+    if not await guard(update, context): return
     uid, _ = target_from(update, context)
     if uid is None:
         await update.effective_message.reply_text('用法：/gm_unban 用户ID，或「解封 用户ID」。')
@@ -132,7 +151,7 @@ async def unban(update, context):
 
 
 async def black_add(update, context):
-    if not await guard(update): return
+    if not await guard(update, context): return
     uid, name = target_from(update, context)
     if uid is None:
         await update.effective_message.reply_text('回复目标成员发送「加黑名单」，或 /gm_black_add 用户ID。')
@@ -147,7 +166,7 @@ async def black_add(update, context):
 
 
 async def black_del(update, context):
-    if not await guard(update): return
+    if not await guard(update, context): return
     uid, _ = target_from(update, context)
     if uid is None:
         await update.effective_message.reply_text('用法：/gm_black_del 用户ID，或「移除黑名单 用户ID」。')
@@ -159,26 +178,29 @@ async def black_del(update, context):
 
 
 async def blacklist(update, context):
-    if not await guard(update): return
+    if not await guard(update, context): return
     with connect() as con:
         rows = con.execute('SELECT uid,name FROM blacklist WHERE chat_id=? ORDER BY created DESC LIMIT 50', (update.effective_chat.id,)).fetchall()
     await update.effective_message.reply_text('📋 本群黑名单（最多显示50条）：\n' + ('\n'.join(f'{i}. {name}（{uid}）' for i,(uid,name) in enumerate(rows,1)) if rows else '暂无'))
 
 
 async def admin_add(update, context):
-    if not await guard(update, super_only=True): return
+    if not await guard(update, context, manage_admins=True): return
     uid, _ = target_from(update, context)
     if uid is None:
         await update.effective_message.reply_text('回复成员发送「添加管理员」，或 /gm_admin_add 用户ID。')
         return
+    if is_super(uid):
+        await update.effective_message.reply_text('ℹ️ 该用户已经是机器人超级管理员，无需重复添加。')
+        return
     with connect() as con:
-        con.execute('INSERT OR IGNORE INTO admins VALUES(?,?,?)', (uid, update.effective_user.id, stamp()))
+        con.execute('INSERT OR IGNORE INTO group_admins VALUES(?,?,?,?)', (update.effective_chat.id, uid, update.effective_user.id, stamp()))
     audit(update.effective_chat.id, update.effective_user.id, '添加管理员', uid)
     await update.effective_message.reply_text(f'👤 已添加机器人管理员：{uid}')
 
 
 async def admin_del(update, context):
-    if not await guard(update, super_only=True): return
+    if not await guard(update, context, manage_admins=True): return
     uid, _ = target_from(update, context)
     if uid is None:
         await update.effective_message.reply_text('用法：/gm_admin_del 用户ID，或「删除管理员 用户ID」。')
@@ -187,20 +209,20 @@ async def admin_del(update, context):
         await update.effective_message.reply_text('❌ 不能通过普通管理员命令移除超级管理员。')
         return
     with connect() as con:
-        con.execute('DELETE FROM admins WHERE uid=?', (uid,))
+        con.execute('DELETE FROM group_admins WHERE chat_id=? AND uid=?', (update.effective_chat.id, uid))
     audit(update.effective_chat.id, update.effective_user.id, '删除管理员', uid)
     await update.effective_message.reply_text(f'👤 已取消机器人管理员：{uid}')
 
 
 async def admins(update, context):
-    if not await guard(update): return
+    if not await guard(update, context): return
     with connect() as con:
-        rows = con.execute('SELECT uid FROM admins ORDER BY uid').fetchall()
-    await update.effective_message.reply_text('👥 超级管理员：' + ', '.join(map(str, SUPER_ADMINS)) + '\n普通管理员：' + (', '.join(str(r[0]) for r in rows) or '暂无'))
+        rows = con.execute('SELECT uid FROM group_admins WHERE chat_id=? ORDER BY uid', (update.effective_chat.id,)).fetchall()
+    await update.effective_message.reply_text('👥 机器人超级管理员：' + ', '.join(map(str, SUPER_ADMINS)) + '\n本群机器人管理员：' + (', '.join(str(r[0]) for r in rows) or '暂无'))
 
 
 async def logs(update, context):
-    if not await guard(update): return
+    if not await guard(update, context): return
     with connect() as con:
         rows = con.execute('SELECT created,actor,action,target FROM audit WHERE chat_id=? ORDER BY id DESC LIMIT 15', (update.effective_chat.id,)).fetchall()
     await update.effective_message.reply_text('📜 最近15条操作：\n' + ('\n'.join(f'{dt} | {action} | 操作人:{actor}' + (f' | 目标:{target}' if target is not None else '') for dt,actor,action,target in rows) if rows else '暂无记录'))
@@ -215,11 +237,11 @@ HELP = '''FHGL 群管专用命令（仅本机器人）
 管理员列表 /gm_admins；操作日志 /gm_logs
 群管帮助 /gm_help
 封禁、加黑名单、添加管理员可回复目标消息操作。
-普通管理员不能添加/删除管理员。'''
+Telegram 群主、群管理员及机器人超级管理员可添加/删除本群机器人管理员；普通机器人管理员不可授权他人。'''
 
 
 async def help_cmd(update, context):
-    if not await guard(update): return
+    if not await guard(update, context): return
     await update.effective_message.reply_text(HELP)
 
 
@@ -284,7 +306,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, chinese))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, join_check))
     app.add_error_handler(errors)
-    logger.info('FHGL V2.6.3 started')
+    logger.info('FHGL V2.6.4 started')
     app.run_polling()
 
 
